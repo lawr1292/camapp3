@@ -23,7 +23,6 @@ using Org.Tensorflow.Lite.Support.Common.Ops;
 using Org.Tensorflow.Lite.Support.Image;
 using Org.Tensorflow.Lite.Support.Image.Ops;
 using Org.Tensorflow.Lite.Support.Common;
-using Org.Tensorflow.Lite.Support.Metadata;
 
 namespace camapp3
 {
@@ -38,21 +37,20 @@ namespace camapp3
 
         private IExecutorService executor = Executors.NewSingleThreadExecutor();
 
+        // Variables containing front facing camera
         private int lensFacing = CameraSelector.LensFacingFront;
         private bool isFrontFacing() { return lensFacing == CameraSelector.LensFacingFront; }
 
+        // Global boolean variables
         private bool pauseAnalysis = false;
         private bool sendPhoto = false;
         private int imageRotationDegrees = 0;
-        private TensorImage tfImageBuffer = new TensorImage(Xamarin.TensorFlow.Lite.DataType.Uint8);
+        private bool[] correctEyes = new bool[30];
+        int eyeIter = 0;
+        private int frameCounter;
+        private long lastFpsTimestamp;
 
-        private ImageProcessor tfImageProcessor;
-        private Interpreter tflite;
-        private ObjectDetectionHelper detector;
-        private Size tfInputSize;
-        private Stream labelFile;
-        private const string ModelPath = "face_detection_short.tflite";
-
+        // Necessary Android Variables
         private const string TAG = "CameraMediapipe";
         private const int REQUEST_CODE_PERMISSIONS = 10;
         private const string FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS";
@@ -61,21 +59,29 @@ namespace camapp3
         Java.IO.File outputDirectory;
         IExecutor cameraExecutor;
 
-        private bool[] correctEyes = new bool[30];
-        int eyeIter = 0;
-        private int frameCounter;
-        private long lastFpsTimestamp;
+        // Global Surface Variables
         private SurfaceView surfaceView;
         private TextureView textureView;
-
-
         PreviewView viewFinder;
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~
+        // ML model variables
+        // ~~~~~~~~~~~~~~~~~~~~~~~~
+        private TensorImage tfImageBuffer = new TensorImage(Xamarin.TensorFlow.Lite.DataType.Uint8);
+        private ImageProcessor tfImageProcessor;
+        private Interpreter tflite;
+        private ObjectDetectionHelper detector;
+        private Size tfInputSize;
+        private const string ModelPath = "face_detection_short.tflite";
 
         protected override void OnCreate(Bundle savedInstanceState)
         {
+            // Initialize App
             base.OnCreate(savedInstanceState);
             Xamarin.Essentials.Platform.Init(this, savedInstanceState);
+
             // Set our view from the "main" layout resource
+            // Retrieve Resources from xml File
             SetContentView(Resource.Layout.activity_main);
             container = FindViewById(Resource.Id.camera_container) as ConstraintLayout;
             this.viewFinder = this.FindViewById<PreviewView>(Resource.Id.viewFinder);
@@ -86,18 +92,13 @@ namespace camapp3
             // ~~~~~~~~~~~~~~~~~~~~~~~~
             // ML model variables
             // ~~~~~~~~~~~~~~~~~~~~~~~~
-
             ByteBuffer tfliteModel = FileUtil.LoadMappedFile(this, ModelPath);
-            //MetadataExtractor metadataExtractor = new MetadataExtractor(tfliteModel);
-            //Stream labelFile = metadataExtractor.GetAssociatedFile("labelmap.txt");
             var labelFile = new System.Collections.Generic.List<string>();
             labelFile.Add("Face");
             labelFile.Add("Not Face");
-
             tflite = new Interpreter(tfliteModel);
             detector = new ObjectDetectionHelper(tflite,
                 labelFile);
-
             var inputIndex = 0;
             var tensor = tflite.GetInputTensor(inputIndex);
             var shape = tensor.Shape();
@@ -120,6 +121,8 @@ namespace camapp3
             viewFinder.Touch += ViewFinderOnTouch;
             cameraExecutor = Executors.NewSingleThreadExecutor();
         }
+
+
         protected override void OnDestroy()
         {
             // nnApiDelegate?.Close();
@@ -144,13 +147,21 @@ namespace camapp3
             }
         }
 
+        /*
+         * Handle the Button Click
+         * Handles two situations where if the image is already frozen, the button will save the photo
+         * and if the analysis is ongoing when button is clicked, then it will pause. 
+         */
         public void OnClick()
         {
             // Disable all Camera Controls
             var v = FindViewById<Button>(Resource.Id.camera_capture_button);
             v.Enabled = false;
 
+            // Get image
             ImageView imagePredicted = FindViewById(Resource.Id.image_predicted) as ImageView;
+
+            // If user is intending to save the photo
             if (sendPhoto)
             {
 
@@ -160,12 +171,15 @@ namespace camapp3
                 SaveImage(bitmap, filename);
             }
 
+            // Unpause analysis
             if (pauseAnalysis)
             {
                 // If image analysis is in paused state, resume it
                 pauseAnalysis = false;
                 imagePredicted.Visibility = ViewStates.Gone;
             }
+
+            // Pause analysis
             else
             {
                 // Otherwise, pause image analysis and freeze image
@@ -182,6 +196,10 @@ namespace camapp3
             v.Enabled = true;
         }
 
+        /*
+         * Binds Usecases to Camera Lifecycle
+         * This function is called at start of app, and again whenever camera needs to reset
+         */
         private void StartCamera()
         {
 
@@ -194,7 +212,7 @@ namespace camapp3
                     // Binds the lifecycle of cameras to the lifecycle owner
                     var cameraProvider = (ProcessCameraProvider)CameraProviderFuture.Get();
 
-                    // Preview
+                    // Set-up Preview
                     var preview = new Preview.Builder().Build();
                     preview.SetSurfaceProvider(viewFinder.SurfaceProvider);
 
@@ -203,19 +221,24 @@ namespace camapp3
                     this.imageCapture = new ImageCapture.Builder().Build();
 
                     Log.Debug(TAG, this.viewFinder.Display.Rotation.ToString());
+
+                    // Set up image analysis
                     var imageAnalysis = new ImageAnalysis.Builder()
                         .SetTargetAspectRatio(AspectRatio.Ratio43)
                         .SetTargetRotation((int)this.viewFinder.Display.Rotation)
                         .SetBackpressureStrategy(ImageAnalysis.StrategyKeepOnlyLatest).Build();
 
+                    // Start frame counter
                     frameCounter = 0;
                     lastFpsTimestamp = JavaSystem.CurrentTimeMillis();
 
+                    // Set imageanalysis to particular thread
                     imageAnalysis.SetAnalyzer(cameraExecutor, this);
 
                     // Select Front Camera as default
                     CameraSelector cameraSelector = new CameraSelector.Builder().RequireLensFacing(lensFacing).Build();
 
+                    // Bind use cases
                     try
                     {
                         // Unbind use cases before rebinding
@@ -234,8 +257,10 @@ namespace camapp3
                     // Use the camera object to link our preview use case with the view
                     preview.SetSurfaceProvider(viewFinder.SurfaceProvider);
 
+                    // Allow user to change orientation of phone while using app
                     OnPreviewSizeChosen(preview.AttachedSurfaceResolution);
 
+                    // Post new surfaces to Xml
                     viewFinder.Post(() =>
                     {
                         surfaceView = (SurfaceView)viewFinder.GetChildAt(0);
@@ -246,6 +271,14 @@ namespace camapp3
             });
         }
 
+        /*
+         * 
+         * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+         * This method allows user to change the orientation of phone during app use
+         * This is also where image pre-processing happens!!
+         * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+         * 
+         */
         private void OnPreviewSizeChosen(Size size)
         {
             imageRotationDegrees = viewFinder.Display.Rotation switch
@@ -257,10 +290,10 @@ namespace camapp3
                 _ => 0
             };
 
-
+            // initialize empty bitmap buffer
             bitmapBuffer = Bitmap.CreateBitmap(size.Height, size.Width, Bitmap.Config.Argb8888);
 
-
+            // Set up the image processor
             var cropSize = Math.Min(bitmapBuffer.Width, bitmapBuffer.Height);
             tfImageProcessor = new ImageProcessor.Builder()
                 //.Add(new ResizeWithCropOrPadOp(cropSize, cropSize))
@@ -270,6 +303,15 @@ namespace camapp3
                 .Build();
         }
 
+        /*
+         * Handles image analysis
+         * Uses tflite API and objectdetectionhelper to retrieve a parsible
+         * output from the tflite model. 
+         * This works by getting the bits from the image on the screen, processing bits 
+         * according to the tfImageProcessor defined in previous method and calling the 
+         * objectdetectionhelper by sending in the processed tensorimage. The objectdetectionhelper
+         * Should return an object that contains easy to read output data
+         */
         public void Analyze(IImageProxy image)
         {
             image.Close();
@@ -310,29 +352,40 @@ namespace camapp3
 
         }
 
+        /*
+         * This is the method that puts the prediction on the screen
+         */
         private void ReportPrediction(ObjectDetectionHelper.ObjectPrediction prediction)
         {
             viewFinder.Post(() =>
             {
+                // get the button and text_prediction object from the xml.
                 var qtbutton = (Button)FindViewById(Resource.Id.camera_capture_button);
                 var textPrediction = (TextView)FindViewById(Resource.Id.text_prediction);
+
                 // Update the text
                 textPrediction.Text = prediction.Score.ToString("0.00") + prediction.Label;
 
+                // Fro debugging
                 Log.Debug(TAG, // "Prediction is null: " + (prediction == null).ToString() +
                     "\nPrediction.score = " + prediction.Score +
                     "\nPrediction label = " + prediction.Label);
-                if (prediction != null && prediction.Label == "Eye")
+
+                // This if statement will fill a spot in an array for every frame it sees a face
+                // and if it does not see a face for a frame the array resets
+                if (prediction != null && prediction.Label == "Face")
                 {
                     correctEyes[eyeIter] = true;
                     eyeIter++;
                 }
-                else if (prediction != null && prediction.Label == "Not Eye")
+                else if (prediction != null && prediction.Label == "")
                 {
                     correctEyes = new bool[30];
                     eyeIter = 0;
                 }
 
+                // Once face is seen five times then analysis is stopped and the image is captured and
+                // user may choose to return to analysis or save image
                 if (eyeIter == 5)
                 {
                     correctEyes = new bool[30];
@@ -366,6 +419,7 @@ namespace camapp3
             return file;
         }
 
+        // Save image helper function
         public bool SaveImage(Bitmap bitmap, string filename)
         {
             bool success = false;
@@ -390,6 +444,7 @@ namespace camapp3
             return success;
         }
 
+        // handles screen touch when stream from camera is paused
         private void imgOnTouch(object sender, View.TouchEventArgs touchEventArgs)
         {
             ((ImageView)sender).Touch -= imgOnTouch;
@@ -397,6 +452,7 @@ namespace camapp3
             pauseAnalysis = false;
         }
 
+        // handles screen touch when stream is live
         private void ViewFinderOnTouch(object sender, View.TouchEventArgs touchEventArgs)
         {
 
@@ -419,11 +475,5 @@ namespace camapp3
             if (copyResult != (int)PixelCopyResult.Success)
                 Log.Error(TAG, "OnPixelCopyFinished() failed");
         }
-    }
-
-    public class ObjectPrediction
-    {
-        public string label { get; set; }
-        public float score { get; set; }
     }
 }
